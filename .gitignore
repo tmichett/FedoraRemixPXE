@@ -1,0 +1,25 @@
+# Data directories (generated at runtime)
+data/
+
+# Generated configuration (contains host-specific settings)
+config/dhcpd.conf
+config/pxe-server.env
+
+# Don't ignore the template and gitkeep
+!config/dhcpd.conf.template
+!config/.gitkeep
+!assets/.gitkeep
+
+# ISO files (too large for git)
+*.iso
+
+# Backup files
+*.bak
+*~
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
