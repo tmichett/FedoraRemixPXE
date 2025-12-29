@@ -80,21 +80,99 @@ check_podman() {
 detect_network() {
     log_info "Detecting network configuration..."
     
-    # Get list of network interfaces (excluding lo and virtual interfaces)
-    local interfaces=($(ip -o link show | awk -F': ' '{print $2}' | grep -v -E '^(lo|veth|br-|docker|virbr|podman)'))
+    # Get list of physical network interfaces
+    # Exclude: loopback, virtual (veth, br-, docker, virbr, podman), and wireless
+    local -a interfaces=()
+    local -a iface_info=()
+    
+    while IFS= read -r iface; do
+        # Skip empty lines
+        [[ -z "$iface" ]] && continue
+        
+        # Skip virtual interfaces
+        [[ "$iface" =~ ^(lo|veth|br-|docker|virbr|podman|tun|tap) ]] && continue
+        
+        # Check if wireless (has /sys/class/net/<iface>/wireless directory)
+        if [[ -d "/sys/class/net/$iface/wireless" ]]; then
+            continue
+        fi
+        
+        # Check if it's a physical device (has /sys/class/net/<iface>/device)
+        # This filters out some virtual interfaces
+        if [[ ! -d "/sys/class/net/$iface/device" ]] && [[ "$iface" != "lo" ]]; then
+            # Still include if it has an IP (might be a bridge we want)
+            local has_ip=$(ip -4 addr show "$iface" 2>/dev/null | grep -c "inet ")
+            [[ "$has_ip" -eq 0 ]] && continue
+        fi
+        
+        interfaces+=("$iface")
+    done < <(ip -o link show | awk -F': ' '{print $2}' | sed 's/@.*//')
+    
+    if [[ ${#interfaces[@]} -eq 0 ]]; then
+        log_error "No suitable network interfaces found"
+        exit 1
+    fi
     
     if [[ -z "$PXE_INTERFACE" ]]; then
         echo ""
-        echo "Available network interfaces:"
+        echo -e "${BLUE}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║                     Available Network Interfaces                         ║${NC}"
+        echo -e "${BLUE}╠════╦════════════════╦══════════╦═══════════════════╦═════════════════════╣${NC}"
+        echo -e "${BLUE}║${NC} #  ${BLUE}║${NC} Interface      ${BLUE}║${NC}  Status  ${BLUE}║${NC} IP Address        ${BLUE}║${NC} MAC Address         ${BLUE}║${NC}"
+        echo -e "${BLUE}╠════╬════════════════╬══════════╬═══════════════════╬═════════════════════╣${NC}"
+        
         for i in "${!interfaces[@]}"; do
             local iface="${interfaces[$i]}"
+            
+            # Get interface status (UP/DOWN)
+            local state=$(ip link show "$iface" 2>/dev/null | grep -oP '(?<=state )\w+' | head -1)
+            local state_color=""
+            case "$state" in
+                UP)
+                    state_color="${GREEN}"
+                    state="UP"
+                    ;;
+                DOWN)
+                    state_color="${RED}"
+                    state="DOWN"
+                    ;;
+                *)
+                    state_color="${YELLOW}"
+                    state="${state:-UNKNOWN}"
+                    ;;
+            esac
+            
+            # Get IP address
             local ip=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-            echo "  $((i+1)). $iface ${ip:+($ip)}"
+            ip="${ip:---}"
+            
+            # Get MAC address
+            local mac=$(ip link show "$iface" 2>/dev/null | grep -oP '(?<=link/ether\s)[a-f0-9:]+' | head -1)
+            mac="${mac:---}"
+            
+            # Format output
+            printf "${BLUE}║${NC} %-2s ${BLUE}║${NC} %-14s ${BLUE}║${NC} %s%-8s${NC} ${BLUE}║${NC} %-17s ${BLUE}║${NC} %-19s ${BLUE}║${NC}\n" \
+                "$((i+1))" "$iface" "$state_color" "$state" "$ip" "$mac"
         done
+        
+        echo -e "${BLUE}╚════╩════════════════╩══════════╩═══════════════════╩═════════════════════╝${NC}"
         echo ""
-        read -p "Select interface for PXE services [1]: " choice
-        choice=${choice:-1}
-        PXE_INTERFACE="${interfaces[$((choice-1))]}"
+        echo -e "${YELLOW}Note:${NC} Wireless adapters are excluded from this list."
+        echo ""
+        
+        # Prompt for selection
+        local valid_choice=false
+        while [[ "$valid_choice" == "false" ]]; do
+            read -p "Select interface number for DHCP/PXE services [1]: " choice
+            choice=${choice:-1}
+            
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#interfaces[@]} ]]; then
+                valid_choice=true
+                PXE_INTERFACE="${interfaces[$((choice-1))]}"
+            else
+                log_error "Invalid selection. Please enter a number between 1 and ${#interfaces[@]}"
+            fi
+        done
     fi
     
     if [[ -z "$PXE_INTERFACE" ]]; then
