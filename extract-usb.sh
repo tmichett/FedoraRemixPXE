@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# ISO Extraction Script for PXE Boot
-# Extracts kernel, initrd, and squashfs from a Fedora/RHEL LiveCD ISO
+# USB Extraction Script for PXE Boot
+# Copies kernel, initrd, and squashfs from a mounted LiveUSB
 # and generates PXE boot menu configurations
 #
 
@@ -20,7 +20,6 @@ DATA_DIR="${SCRIPT_DIR}/data"
 TFTP_DIR="${DATA_DIR}/tftpboot"
 HTTP_DIR="${DATA_DIR}/http"
 CONFIG_DIR="${SCRIPT_DIR}/config"
-MOUNT_POINT="/tmp/pxe-iso-mount-$$"
 
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -34,16 +33,6 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-cleanup() {
-    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
-        log_info "Unmounting ISO..."
-        umount "$MOUNT_POINT" 2>/dev/null || true
-    fi
-    rmdir "$MOUNT_POINT" 2>/dev/null || true
-}
-
-trap cleanup EXIT
-
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root (use sudo)"
@@ -54,13 +43,13 @@ check_root() {
 usage() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         Fedora Remix PXE - ISO Extraction Script             ║${NC}"
+    echo -e "${CYAN}║         Fedora Remix PXE - USB Extraction Script             ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo "Usage: $0 [OPTIONS] <path-to-iso>"
+    echo "Usage: $0 [OPTIONS] [USB_PATH_OR_LABEL]"
     echo ""
     echo "Arguments:"
-    echo "  path-to-iso    Path to a Fedora/RHEL LiveCD ISO file"
+    echo "  USB_PATH_OR_LABEL   Path to mounted USB or volume label (default: FedoraRemix)"
     echo ""
     echo "Options:"
     echo "  -i, --ip IP        PXE server IP address"
@@ -70,13 +59,14 @@ usage() {
     echo "  -h, --help         Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0 /path/to/Fedora-Live.iso"
-    echo "  $0 -i 192.168.100.1 -p fedora43 -l 'Fedora 43 Remix' -y /path/to/iso"
+    echo "  $0                                    # Auto-detect FedoraRemix USB"
+    echo "  $0 /run/media/user/FedoraRemix       # Specify mount path"
+    echo "  $0 -i 192.168.100.1 -p fedora43 -y   # Non-interactive with IP"
     echo ""
     echo "This script will:"
-    echo "  1. Extract vmlinuz (kernel) and initrd.img to TFTP directory"
-    echo "  2. Extract squashfs.img to HTTP directory for network boot"
-    echo "  3. Ask for configuration details (IP, profile name, etc.)"
+    echo "  1. Find or use the specified mounted USB drive"
+    echo "  2. Copy vmlinuz and initrd to TFTP directory"
+    echo "  3. Copy squashfs.img to HTTP directory"
     echo "  4. Generate PXE boot menu configurations (BIOS and UEFI)"
     echo ""
 }
@@ -103,13 +93,84 @@ get_default_ip() {
     echo "192.168.0.1"
 }
 
+# Find mounted USB by label
+find_usb_by_label() {
+    local label="$1"
+    
+    # Check common mount points
+    local mount_points=(
+        "/run/media/${SUDO_USER:-$USER}/$label"
+        "/run/media/root/$label"
+        "/media/${SUDO_USER:-$USER}/$label"
+        "/media/$label"
+        "/mnt/$label"
+    )
+    
+    for mount in "${mount_points[@]}"; do
+        if [[ -d "$mount" && -f "$mount/LiveOS/squashfs.img" ]]; then
+            echo "$mount"
+            return 0
+        fi
+    done
+    
+    # Try to find by scanning lsblk
+    local found_mount=$(lsblk -o LABEL,MOUNTPOINT -n | grep -i "^$label" | awk '{print $2}' | head -1)
+    if [[ -n "$found_mount" && -d "$found_mount" ]]; then
+        echo "$found_mount"
+        return 0
+    fi
+    
+    return 1
+}
+
+# List available USB drives
+list_usb_drives() {
+    echo -e "${BLUE}Available mounted drives with LiveOS:${NC}"
+    echo ""
+    
+    local found=0
+    # Check /run/media
+    for user_dir in /run/media/*; do
+        if [[ -d "$user_dir" ]]; then
+            for mount in "$user_dir"/*; do
+                if [[ -d "$mount" && -f "$mount/LiveOS/squashfs.img" ]]; then
+                    local label=$(basename "$mount")
+                    local size=$(du -sh "$mount/LiveOS/squashfs.img" 2>/dev/null | cut -f1)
+                    echo -e "  ${GREEN}●${NC} $mount (squashfs: $size)"
+                    found=1
+                fi
+            done
+        fi
+    done
+    
+    # Check /media
+    for mount in /media/*; do
+        if [[ -d "$mount" && -f "$mount/LiveOS/squashfs.img" ]]; then
+            local label=$(basename "$mount")
+            local size=$(du -sh "$mount/LiveOS/squashfs.img" 2>/dev/null | cut -f1)
+            echo -e "  ${GREEN}●${NC} $mount (squashfs: $size)"
+            found=1
+        fi
+    done
+    
+    if [[ $found -eq 0 ]]; then
+        echo -e "  ${YELLOW}No mounted LiveOS USB drives found${NC}"
+        echo ""
+        echo "  Make sure your USB drive is mounted and contains:"
+        echo "    - LiveOS/squashfs.img"
+        echo "    - isolinux/vmlinuz0 or isolinux/vmlinuz"
+        echo "    - isolinux/initrd0.img or isolinux/initrd.img"
+    fi
+    echo ""
+}
+
 # Prompt for configuration
 prompt_config() {
-    local iso_basename=$(basename "$1" .iso)
+    local usb_label=$(basename "$1")
     
     # Calculate defaults
     local default_ip=$(get_default_ip)
-    local default_profile=$(echo "$iso_basename" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
+    local default_profile=$(echo "$usb_label" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
     default_profile="${default_profile:0:20}"
     local default_label="Fedora Remix LiveCD"
     
@@ -152,7 +213,6 @@ prompt_config() {
     # Get PXE Server IP
     echo -e "${BLUE}PXE Server IP Address${NC}"
     echo -e "  This is the IP address of this PXE server that clients will connect to."
-    echo -e "  It should be on the same network as your PXE clients."
     read -p "  Enter PXE Server IP [$default_ip]: " input_ip
     PXE_IP="${input_ip:-$default_ip}"
     echo ""
@@ -160,10 +220,8 @@ prompt_config() {
     # Get Profile Name
     echo -e "${BLUE}Profile Name${NC}"
     echo -e "  A short name for this boot image (used in file paths)."
-    echo -e "  Use only letters, numbers, and underscores."
     read -p "  Enter profile name [$default_profile]: " input_profile
     PROFILE_NAME="${input_profile:-$default_profile}"
-    # Sanitize profile name
     PROFILE_NAME=$(echo "$PROFILE_NAME" | sed 's/[^a-zA-Z0-9_]/_/g')
     echo ""
     
@@ -204,7 +262,7 @@ generate_boot_configs() {
     log_info "Creating BIOS boot menu (pxelinux.cfg/default)..."
     cat > "$TFTP_DIR/pxelinux.cfg/default" << EOF
 # PXELinux Configuration for BIOS Boot
-# Generated by extract-iso.sh
+# Generated by extract-usb.sh
 # Profile: $profile
 
 UI vesamenu.c32
@@ -234,7 +292,7 @@ EOF
     log_info "Creating UEFI boot menu (grub.cfg)..."
     local grub_cfg_content=$(cat << EOF
 # GRUB2 configuration for UEFI PXE boot
-# Generated by extract-iso.sh
+# Generated by extract-usb.sh
 # Profile: $profile
 
 function load_video {
@@ -277,158 +335,144 @@ menuentry "Reboot" --class reboot {
 EOF
 )
     
-    # Write grub.cfg to multiple locations where GRUB might look
+    # Write grub.cfg to multiple locations
     echo "$grub_cfg_content" > "$TFTP_DIR/grub.cfg"
     echo "$grub_cfg_content" > "$TFTP_DIR/efi64/grub.cfg"
     
-    # Clean up any old broken symlinks in efi64
+    # Clean up old broken symlinks
     rm -f "$TFTP_DIR/efi64/vmlinuz" 2>/dev/null || true
     rm -f "$TFTP_DIR/efi64/initrd.img" 2>/dev/null || true
     
     log_info "Boot configurations created successfully"
 }
 
-extract_iso() {
-    local iso_path="$1"
+# Copy UEFI boot files to TFTP root
+copy_uefi_files() {
+    local usb_path="$1"
     
-    if [[ ! -f "$iso_path" ]]; then
-        log_error "ISO file not found: $iso_path"
+    log_info "Copying UEFI boot files..."
+    
+    # Copy EFI files if they exist on USB
+    if [[ -f "$usb_path/EFI/BOOT/BOOTX64.EFI" ]]; then
+        cp -f "$usb_path/EFI/BOOT/BOOTX64.EFI" "$TFTP_DIR/"
+        cp -f "$usb_path/EFI/BOOT/BOOTX64.EFI" "$TFTP_DIR/efi64/"
+    fi
+    
+    if [[ -f "$usb_path/EFI/BOOT/grubx64.efi" ]]; then
+        cp -f "$usb_path/EFI/BOOT/grubx64.efi" "$TFTP_DIR/"
+        cp -f "$usb_path/EFI/BOOT/grubx64.efi" "$TFTP_DIR/efi64/"
+    fi
+    
+    # Copy syslinux files if they exist
+    if [[ -f "$usb_path/isolinux/vesamenu.c32" ]]; then
+        cp -f "$usb_path/isolinux/vesamenu.c32" "$TFTP_DIR/"
+    fi
+    if [[ -f "$usb_path/isolinux/ldlinux.c32" ]]; then
+        cp -f "$usb_path/isolinux/ldlinux.c32" "$TFTP_DIR/"
+    fi
+    if [[ -f "$usb_path/isolinux/libutil.c32" ]]; then
+        cp -f "$usb_path/isolinux/libutil.c32" "$TFTP_DIR/"
+    fi
+    if [[ -f "$usb_path/isolinux/libcom32.c32" ]]; then
+        cp -f "$usb_path/isolinux/libcom32.c32" "$TFTP_DIR/"
+    fi
+}
+
+extract_usb() {
+    local usb_path="$1"
+    
+    # Validate USB path
+    if [[ ! -d "$usb_path" ]]; then
+        log_error "USB path not found: $usb_path"
+        exit 1
+    fi
+    
+    if [[ ! -f "$usb_path/LiveOS/squashfs.img" ]]; then
+        log_error "No LiveOS/squashfs.img found in $usb_path"
+        log_error "This doesn't appear to be a valid Fedora LiveUSB"
         exit 1
     fi
     
     # Display header
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         Fedora Remix PXE - ISO Extraction Script             ║${NC}"
+    echo -e "${CYAN}║         Fedora Remix PXE - USB Extraction Script             ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     
+    log_info "USB Source: $usb_path"
+    
     # Prompt for configuration
-    prompt_config "$iso_path"
+    prompt_config "$usb_path"
     
     local profile="$PROFILE_NAME"
-    
-    log_info "Extracting ISO: $iso_path"
-    log_info "Profile name: $profile"
-    
-    # Create mount point
-    mkdir -p "$MOUNT_POINT"
     
     # Create destination directories
     mkdir -p "$TFTP_DIR/$profile"
     mkdir -p "$HTTP_DIR/$profile"
     
-    # Mount ISO
-    log_info "Mounting ISO..."
-    mount -o loop,ro "$iso_path" "$MOUNT_POINT"
-    
-    # Find and copy kernel files
-    log_info "Searching for kernel and initrd..."
-    
+    # Find kernel
     local vmlinuz=""
-    local initrd=""
-    
-    # Common locations for vmlinuz and initrd in Fedora/RHEL LiveCDs
     local kernel_locations=(
-        "isolinux/vmlinuz"
         "isolinux/vmlinuz0"
+        "isolinux/vmlinuz"
         "images/pxeboot/vmlinuz"
-        "EFI/BOOT/vmlinuz"
-        "LiveOS/vmlinuz"
         "boot/vmlinuz"
     )
     
-    local initrd_locations=(
-        "isolinux/initrd.img"
-        "isolinux/initrd0.img"
-        "images/pxeboot/initrd.img"
-        "EFI/BOOT/initrd.img"
-        "LiveOS/initrd.img"
-        "boot/initrd.img"
-    )
-    
-    # Find vmlinuz
     for loc in "${kernel_locations[@]}"; do
-        if [[ -f "$MOUNT_POINT/$loc" ]]; then
-            vmlinuz="$MOUNT_POINT/$loc"
+        if [[ -f "$usb_path/$loc" ]]; then
+            vmlinuz="$usb_path/$loc"
             log_info "Found kernel: $loc"
             break
         fi
     done
     
+    if [[ -z "$vmlinuz" ]]; then
+        log_error "Could not find kernel (vmlinuz) on USB"
+        exit 1
+    fi
+    
     # Find initrd
+    local initrd=""
+    local initrd_locations=(
+        "isolinux/initrd0.img"
+        "isolinux/initrd.img"
+        "images/pxeboot/initrd.img"
+        "boot/initrd.img"
+    )
+    
     for loc in "${initrd_locations[@]}"; do
-        if [[ -f "$MOUNT_POINT/$loc" ]]; then
-            initrd="$MOUNT_POINT/$loc"
+        if [[ -f "$usb_path/$loc" ]]; then
+            initrd="$usb_path/$loc"
             log_info "Found initrd: $loc"
             break
         fi
     done
     
-    if [[ -z "$vmlinuz" ]]; then
-        log_error "Could not find vmlinuz in ISO"
-        log_info "Searching for any vmlinuz file..."
-        find "$MOUNT_POINT" -name "vmlinuz*" -type f 2>/dev/null | head -5
-        exit 1
-    fi
-    
     if [[ -z "$initrd" ]]; then
-        log_error "Could not find initrd.img in ISO"
-        log_info "Searching for any initrd file..."
-        find "$MOUNT_POINT" -name "initrd*" -type f 2>/dev/null | head -5
+        log_error "Could not find initrd on USB"
         exit 1
     fi
     
-    # Copy kernel and initrd to TFTP directory
+    # Copy kernel
     log_info "Copying kernel to $TFTP_DIR/$profile/vmlinuz..."
     cp -f "$vmlinuz" "$TFTP_DIR/$profile/vmlinuz"
     
+    # Copy initrd
     log_info "Copying initrd to $TFTP_DIR/$profile/initrd.img..."
     cp -f "$initrd" "$TFTP_DIR/$profile/initrd.img"
     
-    # Find and copy squashfs
-    log_info "Searching for squashfs image..."
+    # Copy squashfs
+    local squashfs="$usb_path/LiveOS/squashfs.img"
+    local squashfs_size=$(du -h "$squashfs" | cut -f1)
+    log_info "Copying squashfs image ($squashfs_size) to HTTP directory..."
+    log_info "This may take a few minutes..."
     
-    local squashfs=""
-    local squashfs_locations=(
-        "LiveOS/squashfs.img"
-        "LiveOS/rootfs.img"
-        "images/install.img"
-    )
+    cp -f "$squashfs" "$HTTP_DIR/$profile/squashfs.img"
+    log_info "SquashFS copied successfully"
     
-    for loc in "${squashfs_locations[@]}"; do
-        if [[ -f "$MOUNT_POINT/$loc" ]]; then
-            squashfs="$MOUNT_POINT/$loc"
-            log_info "Found squashfs: $loc"
-            break
-        fi
-    done
-    
-    if [[ -z "$squashfs" ]]; then
-        log_warn "Could not find squashfs.img in standard locations"
-        log_info "Searching for squashfs files..."
-        local found_squashfs=$(find "$MOUNT_POINT" -name "*.img" -size +100M -type f 2>/dev/null | head -1)
-        if [[ -n "$found_squashfs" ]]; then
-            squashfs="$found_squashfs"
-            log_info "Found potential squashfs: $squashfs"
-        fi
-    fi
-    
-    if [[ -n "$squashfs" ]]; then
-        local squashfs_size=$(du -h "$squashfs" | cut -f1)
-        log_info "Copying squashfs image ($squashfs_size) to HTTP directory..."
-        log_info "This may take a few minutes..."
-        
-        cp -f "$squashfs" "$HTTP_DIR/$profile/squashfs.img"
-        log_info "SquashFS copied successfully"
-    else
-        log_error "No squashfs image found. PXE boot will not work without it."
-        log_info "You may need to manually copy the root filesystem image."
-    fi
-    
-    # Unmount ISO
-    log_info "Unmounting ISO..."
-    umount "$MOUNT_POINT"
-    rmdir "$MOUNT_POINT"
+    # Copy UEFI boot files
+    copy_uefi_files "$usb_path"
     
     # Generate boot configurations
     generate_boot_configs "$profile" "$PXE_IP" "$MENU_LABEL"
@@ -436,8 +480,10 @@ extract_iso() {
     # Show summary
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  ISO Extraction Complete!${NC}"
+    echo -e "${GREEN}  USB Extraction Complete!${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  ${BLUE}Source:${NC}       $usb_path"
     echo ""
     echo -e "  ${BLUE}Configuration:${NC}"
     echo -e "    PXE Server IP:  $PXE_IP"
@@ -447,10 +493,8 @@ extract_iso() {
     echo -e "  ${BLUE}Files Created:${NC}"
     echo -e "    Kernel:       $TFTP_DIR/$profile/vmlinuz"
     echo -e "    Initrd:       $TFTP_DIR/$profile/initrd.img"
-    if [[ -f "$HTTP_DIR/$profile/squashfs.img" ]]; then
-        local final_size=$(du -h "$HTTP_DIR/$profile/squashfs.img" | cut -f1)
-        echo -e "    SquashFS:     $HTTP_DIR/$profile/squashfs.img ($final_size)"
-    fi
+    local final_size=$(du -h "$HTTP_DIR/$profile/squashfs.img" | cut -f1)
+    echo -e "    SquashFS:     $HTTP_DIR/$profile/squashfs.img ($final_size)"
     echo ""
     echo -e "  ${BLUE}Boot Menus:${NC}"
     echo -e "    BIOS:   $TFTP_DIR/pxelinux.cfg/default"
@@ -473,7 +517,7 @@ ARG_IP=""
 ARG_PROFILE=""
 ARG_LABEL=""
 ARG_YES=false
-ARG_ISO=""
+ARG_USB=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -497,13 +541,17 @@ while [[ $# -gt 0 ]]; do
             ARG_YES=true
             shift
             ;;
+        --list)
+            list_usb_drives
+            exit 0
+            ;;
         -*)
             log_error "Unknown option: $1"
             usage
             exit 1
             ;;
         *)
-            ARG_ISO="$1"
+            ARG_USB="$1"
             shift
             ;;
     esac
@@ -512,9 +560,33 @@ done
 # Main
 check_root
 
-if [[ -z "$ARG_ISO" ]]; then
-    usage
-    exit 1
+# Determine USB path
+USB_PATH=""
+
+if [[ -n "$ARG_USB" ]]; then
+    # User specified a path or label
+    if [[ -d "$ARG_USB" ]]; then
+        USB_PATH="$ARG_USB"
+    else
+        # Try to find by label
+        USB_PATH=$(find_usb_by_label "$ARG_USB")
+        if [[ -z "$USB_PATH" ]]; then
+            log_error "Could not find USB with label or path: $ARG_USB"
+            echo ""
+            list_usb_drives
+            exit 1
+        fi
+    fi
+else
+    # Auto-detect FedoraRemix
+    USB_PATH=$(find_usb_by_label "FedoraRemix")
+    if [[ -z "$USB_PATH" ]]; then
+        log_warn "No FedoraRemix USB found. Searching for other LiveOS drives..."
+        echo ""
+        list_usb_drives
+        exit 1
+    fi
 fi
 
-extract_iso "$ARG_ISO"
+extract_usb "$USB_PATH"
+

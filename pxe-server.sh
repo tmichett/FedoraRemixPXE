@@ -183,17 +183,44 @@ status() {
     # Show boot image status
     echo ""
     echo -e "  ${BLUE}Boot Images:${NC}"
-    if [[ -f "$TFTP_DIR/livecd/vmlinuz" ]] && [[ -f "$TFTP_DIR/livecd/initrd.img" ]]; then
-        echo -e "    ${GREEN}●${NC} Kernel and initrd available"
+    
+    # Find any profile with kernel/initrd
+    local found_kernel=false
+    local found_squashfs=false
+    local profile_name=""
+    
+    for profile_dir in "$TFTP_DIR"/*/; do
+        if [[ -d "$profile_dir" ]]; then
+            local pname=$(basename "$profile_dir")
+            if [[ -f "$profile_dir/vmlinuz" ]] && [[ -f "$profile_dir/initrd.img" ]]; then
+                found_kernel=true
+                profile_name="$pname"
+                break
+            fi
+        fi
+    done
+    
+    for http_dir in "$HTTP_DIR"/*/; do
+        if [[ -d "$http_dir" ]]; then
+            if [[ -f "$http_dir/squashfs.img" ]]; then
+                found_squashfs=true
+                break
+            fi
+        fi
+    done
+    
+    if [[ "$found_kernel" == true ]]; then
+        echo -e "    ${GREEN}●${NC} Kernel and initrd available (profile: $profile_name)"
     else
-        echo -e "    ${YELLOW}●${NC} No kernel/initrd found - run extract-iso.sh"
+        echo -e "    ${YELLOW}●${NC} No kernel/initrd found - run extract-iso.sh or extract-usb.sh"
     fi
     
-    if [[ -f "$HTTP_DIR/livecd/squashfs.img" ]]; then
-        local size=$(du -h "$HTTP_DIR/livecd/squashfs.img" 2>/dev/null | cut -f1)
+    if [[ "$found_squashfs" == true ]]; then
+        local squashfs_file=$(find "$HTTP_DIR" -name "squashfs.img" -type f 2>/dev/null | head -1)
+        local size=$(du -h "$squashfs_file" 2>/dev/null | cut -f1)
         echo -e "    ${GREEN}●${NC} SquashFS image available ($size)"
     else
-        echo -e "    ${YELLOW}●${NC} No squashfs image found - run extract-iso.sh"
+        echo -e "    ${YELLOW}●${NC} No squashfs image found - run extract-iso.sh or extract-usb.sh"
     fi
     
     echo ""
