@@ -503,6 +503,46 @@ def configure_network_interface(interface, ip_address):
     run_cmd(f"nmcli connection up '{conn_name}'", check=False)
 
 
+def configure_firewall():
+    """Configure firewall rules for PXE services."""
+    log_info("Configuring firewall rules...")
+    
+    # Check if firewall-cmd is available
+    if not shutil.which("firewall-cmd"):
+        log_warn("firewall-cmd not found, skipping firewall configuration")
+        log_warn("Ensure your firewall allows: TFTP(69/udp), DHCP(67-68/udp), HTTP(80/tcp)")
+        return
+    
+    # Check if firewalld is running
+    result = run_cmd("systemctl is-active --quiet firewalld", check=False, capture=True)
+    if result.returncode != 0:
+        log_warn("firewalld is not running, skipping firewall configuration")
+        log_warn("Ensure your firewall allows: TFTP(69/udp), DHCP(67-68/udp), HTTP(80/tcp)")
+        return
+    
+    log_info("Configuring firewalld...")
+    
+    # Add PXE-related services
+    run_cmd("firewall-cmd --permanent --add-service=tftp", check=False, capture=True)
+    run_cmd("firewall-cmd --permanent --add-service=dhcp", check=False, capture=True)
+    run_cmd("firewall-cmd --permanent --add-service=http", check=False, capture=True)
+    run_cmd("firewall-cmd --permanent --add-service=dns", check=False, capture=True)
+    
+    # Add specific ports
+    run_cmd("firewall-cmd --permanent --add-port=69/udp", check=False, capture=True)   # TFTP
+    run_cmd("firewall-cmd --permanent --add-port=67/udp", check=False, capture=True)   # DHCP Server
+    run_cmd("firewall-cmd --permanent --add-port=68/udp", check=False, capture=True)   # DHCP Client
+    run_cmd("firewall-cmd --permanent --add-port=80/tcp", check=False, capture=True)   # HTTP
+    run_cmd("firewall-cmd --permanent --add-port=53/udp", check=False, capture=True)   # DNS
+    run_cmd("firewall-cmd --permanent --add-port=53/tcp", check=False, capture=True)   # DNS
+    run_cmd("firewall-cmd --permanent --add-port=4011/udp", check=False, capture=True) # PXE proxy DHCP
+    
+    # Reload firewall
+    run_cmd("firewall-cmd --reload", check=False, capture=True)
+    
+    log_info("Firewall rules applied successfully")
+
+
 def start_container(config, data_dir, config_dir):
     """Start the PXE server container."""
     log_info("Starting PXE server container...")
@@ -808,6 +848,9 @@ Examples:
     
     # Configure network interface
     configure_network_interface(config['interface'], config['server_ip'])
+    
+    # Configure firewall
+    configure_firewall()
     
     # Save configuration
     env_content = f"""# PXE Server Configuration
