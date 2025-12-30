@@ -6,21 +6,59 @@ A containerized PXE boot server for network booting Fedora Remix LiveCDs and oth
 
 ## Features
 
+- **Single-Script Launcher**: One Python script handles everything - download, setup, extraction, and management
 - **Containerized Design**: All services run in a single Podman container
 - **Full PXE Stack**: Includes DHCP, TFTP, and HTTP servers
 - **BIOS & UEFI Support**: Works with both legacy BIOS and modern UEFI systems
-- **Easy ISO Extraction**: Simple script to prepare LiveCD ISOs for PXE boot
+- **ISO and USB Extraction**: Extract boot files from ISO files or mounted USB drives
+- **Built-in Diagnostics**: Network diagnostic script available via boot menu and HTTP
 - **Firewall Ready**: Automatic firewall configuration for Fedora systems
 - **Registry Published**: Pre-built images available on quay.io
 
-## Quick Start
+## Quick Start (Recommended)
+
+The easiest way to use this PXE server is with the single-script launcher:
+
+```bash
+# Download and run the launcher (requires root)
+sudo ./run-pxe-server.py
+```
+
+The launcher will:
+1. Download the container image if needed
+2. Guide you through network configuration
+3. Ask if you want to extract from ISO or USB
+4. Start the PXE server with all services
+
+### Launcher Commands
+
+```bash
+# Interactive setup and start
+sudo ./run-pxe-server.py
+
+# Check server status
+./run-pxe-server.py --status
+
+# View container logs
+./run-pxe-server.py --logs
+
+# Open shell in container
+sudo ./run-pxe-server.py --shell
+
+# Stop the server
+sudo ./run-pxe-server.py --stop
+```
+
+## Alternative: Manual Setup
+
+If you prefer more control, use the individual scripts:
 
 ### Prerequisites
 
 - Fedora Linux (or compatible distribution)
 - Podman installed (`sudo dnf install podman`)
 - Root access for network configuration
-- A Fedora LiveCD ISO file
+- A Fedora LiveCD ISO file or mounted USB drive
 
 ### Installation
 
@@ -42,9 +80,16 @@ A containerized PXE boot server for network booting Fedora Remix LiveCDs and oth
    - Build the PXE server container
    - Start the container with all services
 
-3. **Extract an ISO for PXE boot:**
+3. **Extract boot files from ISO or USB:**
    ```bash
+   # From ISO
    sudo ./extract-iso.sh /path/to/Fedora-Live.iso
+   
+   # From mounted USB (auto-detects "FedoraRemix" label)
+   sudo ./extract-usb.sh
+   
+   # From specific USB path
+   sudo ./extract-usb.sh /run/media/user/MyUSB
    ```
 
 4. **Boot a client via PXE!**
@@ -53,20 +98,28 @@ A containerized PXE boot server for network booting Fedora Remix LiveCDs and oth
 
 ```
 FedoraRemixPXE/
-├── setup-pxe-server.sh    # Initial setup and configuration
+├── run-pxe-server.py      # Single-script launcher (recommended)
+├── setup-pxe-server.sh    # Manual setup and configuration
 ├── pxe-server.sh          # Server management (start/stop/status)
 ├── extract-iso.sh         # ISO extraction utility
+├── extract-usb.sh         # USB extraction utility
 ├── build-container.sh     # Build and push container to registry
+├── test-services.sh       # Test containerized services
+├── show-dhcp-clients.sh   # Show connected DHCP clients
+├── pxe-initrd-diag.sh     # Initrd diagnostics (also in container)
 ├── Containerfile          # Container image definition
 ├── config/                # Configuration files
-│   └── dhcpd.conf         # DHCP server configuration (generated)
+│   ├── dhcpd.conf         # DHCP server configuration (generated)
+│   ├── dhcpd.conf.template # DHCP template with examples
+│   └── pxe-server.env     # Saved environment variables
 └── data/                  # Runtime data
     ├── tftpboot/          # TFTP root (kernel, initrd, boot files)
     │   ├── pxelinux.cfg/  # BIOS PXE menu configuration
     │   ├── efi64/         # UEFI boot files and GRUB config
-    │   └── livecd/        # Extracted kernel/initrd
+    │   └── <profile>/     # Extracted kernel/initrd per profile
     └── http/              # HTTP server root
-        └── livecd/        # SquashFS images served via HTTP
+        ├── <profile>/     # SquashFS images served via HTTP
+        └── diag/          # Diagnostic scripts
 ```
 
 ## Container Registry
@@ -79,8 +132,8 @@ The container image is published to **quay.io/tmichett/fedoraremixpxe**.
 # Pull the latest image
 podman pull quay.io/tmichett/fedoraremixpxe:latest
 
-# Run setup (will use the pulled image)
-sudo ./setup-pxe-server.sh
+# Or just run the launcher - it pulls automatically
+sudo ./run-pxe-server.py
 ```
 
 ### Building and Pushing
@@ -134,20 +187,78 @@ sudo ./pxe-server.sh rebuild
 
 ### Adding Boot Images
 
-To add a new ISO for PXE boot:
+#### From ISO File:
 
 ```bash
-# Extract with default profile name 'livecd'
+# Interactive mode - prompts for IP, profile name, and menu label
 sudo ./extract-iso.sh /path/to/Fedora-Workstation-Live.iso
 
-# Extract with custom profile name
-sudo ./extract-iso.sh /path/to/Fedora-Server.iso fedora-server
+# Non-interactive mode
+sudo ./extract-iso.sh -i 192.168.0.1 -p fedora43 -l "Fedora 43 Remix" -y /path/to/iso
 ```
 
-The extraction script automatically finds and copies:
+#### From Mounted USB:
+
+```bash
+# Auto-detect "FedoraRemix" labeled USB
+sudo ./extract-usb.sh
+
+# Specify USB path or label
+sudo ./extract-usb.sh /run/media/user/FedoraRemix
+
+# Non-interactive mode
+sudo ./extract-usb.sh -i 192.168.0.1 -p fedora43 -l "Fedora 43 Remix" -y
+```
+
+The extraction scripts automatically find and copy:
 - `vmlinuz` (kernel) → `data/tftpboot/<profile>/`
 - `initrd.img` → `data/tftpboot/<profile>/`
 - `squashfs.img` → `data/http/<profile>/`
+
+And generate boot menu configurations for both BIOS and UEFI.
+
+## Boot Menu Options
+
+After extraction, the PXE boot menu includes:
+
+| Option | Description |
+|--------|-------------|
+| **Boot from local drive** | Continue to local boot (default) |
+| **<Profile Name>** | Boot the LiveCD normally |
+| **<Profile Name> (DHCP fallback)** | Use DHCP for kernel network (UEFI only) |
+| **<Profile Name> (Debug Mode)** | Boot into initrd shell (rd.break) |
+| **Network Diagnostics** | Boot to initrd shell with network for debugging |
+
+## Diagnostics
+
+### Built-in Diagnostic Script
+
+The container includes a diagnostic script accessible via HTTP:
+
+```bash
+# From the PXE client's initrd shell (rd.break):
+curl -s http://192.168.0.1/diag/pxe-initrd-diag.sh | bash
+```
+
+This script checks:
+- Kernel command line
+- Network interfaces and IP addresses
+- NetworkManager status
+- DHCP client status
+- Connectivity to the PXE server
+
+### Test Services
+
+```bash
+# Test all containerized services
+sudo ./test-services.sh
+
+# Show DHCP clients
+sudo ./show-dhcp-clients.sh
+
+# Watch DHCP activity in real-time
+sudo ./show-dhcp-clients.sh --watch
+```
 
 ## Configuration
 
@@ -165,9 +276,10 @@ The PXE server acts as a single-server setup where one machine provides all serv
 | **PXE Client Pool** | 192.168.0.201 - 192.168.0.240 |
 
 The setup script will:
-1. Detect available network interfaces
-2. Check/configure the static IP on the selected interface
-3. Bind DHCP to the specific interface for proper operation
+1. Detect available network interfaces (excluding wireless/virtual)
+2. Display a table with interface status and IP addresses
+3. Let you select and configure the static IP on the interface
+4. Bind DHCP to the specific interface for proper operation
 
 ### Custom Network Settings
 
@@ -185,12 +297,6 @@ sudo PXE_INTERFACE=eth0 \
      PXE_VIRTUAL_RANGE_END=192.168.1.140 \
      PXE_DOMAIN=mynetwork.local \
      ./setup-pxe-server.sh
-```
-
-Or use command-line options:
-
-```bash
-sudo ./setup-pxe-server.sh -i eth0 -s 192.168.0.1 -r 192.168.0.201 192.168.0.240
 ```
 
 **Note:** Router and DNS automatically use the PXE_SERVER_IP (single-server setup).
@@ -227,11 +333,12 @@ Example menu entry for a custom ISO:
 LABEL fedora-custom
     MENU LABEL ^Boot Custom Fedora
     KERNEL custom/vmlinuz
-    APPEND initrd=custom/initrd.img root=live:http://192.168.0.1/custom/squashfs.img ro rd.live.image
+    APPEND initrd=custom/initrd.img root=live:http://192.168.0.1/custom/squashfs.img ro rd.live.image rd.neednet=1 ip=dhcp
+    IPAPPEND 2
 
 # GRUB format (UEFI)
 menuentry "Boot Custom Fedora" {
-    linuxefi custom/vmlinuz root=live:http://192.168.0.1/custom/squashfs.img ro rd.live.image
+    linuxefi custom/vmlinuz root=live:http://192.168.0.1/custom/squashfs.img ro rd.live.image rd.neednet=1 ip=${myip}::${mygateway}:255.255.255.0:pxeclient::none nameserver=192.168.0.1
     initrdefi custom/initrd.img
 }
 ```
@@ -261,7 +368,7 @@ If you have an existing DHCP server on your network, you have two options:
    next-server <PXE_SERVER_IP>;
    filename "pxelinux.0";  # For BIOS
    # or
-   filename "efi64/BOOTX64.EFI";  # For UEFI
+   filename "BOOTX64.EFI";  # For UEFI
    ```
 
 2. **Use a separate network/VLAN** for PXE booting
@@ -274,6 +381,7 @@ If you have an existing DHCP server on your network, you have two options:
 - Check that DHCP is running: `./pxe-server.sh status`
 - Verify firewall rules: `sudo firewall-cmd --list-all`
 - Check for conflicting DHCP servers on the network
+- View DHCP activity: `sudo ./show-dhcp-clients.sh --watch`
 
 **Client gets IP but doesn't boot:**
 - Check TFTP is accessible: `tftp <server-ip> -c get pxelinux.0`
@@ -283,11 +391,20 @@ If you have an existing DHCP server on your network, you have two options:
 **UEFI client fails to boot:**
 - Ensure `BOOTX64.EFI` and `grubx64.efi` exist in `data/tftpboot/efi64/`
 - Check that Secure Boot is disabled on the client
+- Try the TFTP root copy: `data/tftpboot/BOOTX64.EFI`
 
-**LiveCD fails to load:**
-- Verify squashfs is accessible: `curl http://<server-ip>/livecd/squashfs.img -I`
+**LiveCD fails to load (squashfs.img not found):**
+- Verify squashfs is accessible: `curl http://<server-ip>/<profile>/squashfs.img -I`
 - Check HTTP server is running: `./pxe-server.sh status`
 - Ensure sufficient memory on client (4GB+ recommended)
+- Use the Debug Mode boot option to check network in initrd shell
+- The UEFI menu passes the GRUB-obtained IP to the kernel to prevent IP loss
+
+**Client loses network after GRUB menu:**
+- This is a known issue with network handoff from PXE/GRUB to the kernel
+- The boot configs now pass the static IP from GRUB to the kernel
+- Try the "DHCP fallback" option if the static IP method doesn't work
+- Use Debug Mode to run diagnostics: `curl -s http://<server>/diag/pxe-initrd-diag.sh | bash`
 
 ### Viewing Logs
 
@@ -300,6 +417,9 @@ If you have an existing DHCP server on your network, you have two options:
 
 # Just DHCP activity
 ./pxe-server.sh logs | grep -i dhcp
+
+# Test services
+sudo ./test-services.sh
 ```
 
 ### Testing TFTP
@@ -326,20 +446,33 @@ ls -la pxelinux.0
 └───────┼───────────────┼───────────────┼─────────────────────┘
         │               │               │
         ▼               ▼               ▼
-   ┌─────────────────────────────────────────────────────┐
-   │                    Host Network                      │
-   └─────────────────────────────────────────────────────┘
+   ┌─────────────────────────────────────────────────────────┐
+   │                    Host Network                          │
+   └─────────────────────────────────────────────────────────┘
                             │
                             ▼
-   ┌─────────────────────────────────────────────────────┐
-   │                     PXE Client                       │
-   │                                                      │
-   │   1. DHCP Request → Get IP + Boot Server Info       │
-   │   2. TFTP Download → Get kernel + initrd            │
-   │   3. HTTP Download → Get squashfs root filesystem   │
-   │   4. Boot into LiveCD environment                   │
-   └─────────────────────────────────────────────────────┘
+   ┌─────────────────────────────────────────────────────────┐
+   │                     PXE Client                           │
+   │                                                          │
+   │   1. DHCP Request → Get IP + Boot Server Info           │
+   │   2. TFTP Download → Get bootloader (GRUB/pxelinux)     │
+   │   3. TFTP Download → Get kernel + initrd                │
+   │   4. HTTP Download → Get squashfs root filesystem       │
+   │   5. Boot into LiveCD environment                       │
+   └─────────────────────────────────────────────────────────┘
 ```
+
+## Container Contents
+
+The container image includes:
+
+- **DHCP Server** (dhcpd) - Assigns IP addresses and PXE boot info
+- **TFTP Server** (in.tftpd) - Serves bootloaders, kernel, and initrd
+- **HTTP Server** (httpd) - Serves large root filesystem images
+- **PXELinux/Syslinux** - BIOS bootloader files
+- **Shim/GRUB2** - UEFI bootloader files (Secure Boot capable)
+- **Extraction Script** - Built-in boot file extraction from ISO/USB
+- **Diagnostic Script** - Network troubleshooting tools
 
 ## License
 
@@ -348,3 +481,7 @@ This project is provided as-is for educational and personal use.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
+
+## Author
+
+Travis Michette (tmichett)
