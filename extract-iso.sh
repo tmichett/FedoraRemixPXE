@@ -222,12 +222,12 @@ LABEL local
 LABEL $profile
     MENU LABEL ^$label
     KERNEL $profile/vmlinuz
-    APPEND initrd=$profile/initrd.img root=live:http://$ip/$profile/squashfs.img ip=dhcp ro rd.live.image rd.luks=0 rd.dm=0
+    APPEND initrd=$profile/initrd.img root=live:http://$ip/$profile/squashfs.img rd.neednet=1 ro rd.live.image rd.luks=0 rd.dm=0
 
 LABEL ${profile}-debug
     MENU LABEL $label (^Debug Mode)
     KERNEL $profile/vmlinuz
-    APPEND initrd=$profile/initrd.img root=live:http://$ip/$profile/squashfs.img ip=dhcp ro rd.live.image rd.luks=0 rd.dm=0 rd.break
+    APPEND initrd=$profile/initrd.img root=live:http://$ip/$profile/squashfs.img rd.neednet=1 ro rd.live.image rd.luks=0 rd.dm=0 rd.break
 EOF
     
     # Generate UEFI boot config (grub.cfg)
@@ -258,12 +258,12 @@ set default=0
 set timeout=60
 
 menuentry "$label" --class fedora --class gnu-linux --class gnu --class os {
-    linuxefi $profile/vmlinuz root=live:http://$ip/$profile/squashfs.img ip=dhcp ro rd.live.image rd.luks=0 rd.dm=0
+    linuxefi $profile/vmlinuz root=live:http://$ip/$profile/squashfs.img rd.neednet=1 ro rd.live.image rd.luks=0 rd.dm=0
     initrdefi $profile/initrd.img
 }
 
 menuentry "$label (Debug Mode)" --class fedora --class gnu-linux --class gnu --class os {
-    linuxefi $profile/vmlinuz root=live:http://$ip/$profile/squashfs.img ip=dhcp ro rd.live.image rd.luks=0 rd.dm=0 rd.break
+    linuxefi $profile/vmlinuz root=live:http://$ip/$profile/squashfs.img rd.neednet=1 ro rd.live.image rd.luks=0 rd.dm=0 rd.break
     initrdefi $profile/initrd.img
 }
 
@@ -435,36 +435,88 @@ extract_iso() {
     
     # Show summary
     echo ""
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  ISO Extraction Complete!${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║              ISO Extraction Complete!                         ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${BLUE}Configuration:${NC}"
-    echo -e "    PXE Server IP:  $PXE_IP"
-    echo -e "    Profile Name:   $profile"
-    echo -e "    Menu Label:     $MENU_LABEL"
+    echo -e "  ${CYAN}Source ISO:${NC} $iso_path"
     echo ""
-    echo -e "  ${BLUE}Files Created:${NC}"
-    echo -e "    Kernel:       $TFTP_DIR/$profile/vmlinuz"
-    echo -e "    Initrd:       $TFTP_DIR/$profile/initrd.img"
-    if [[ -f "$HTTP_DIR/$profile/squashfs.img" ]]; then
-        local final_size=$(du -h "$HTTP_DIR/$profile/squashfs.img" | cut -f1)
-        echo -e "    SquashFS:     $HTTP_DIR/$profile/squashfs.img ($final_size)"
+    
+    # Load DHCP config for display
+    local dhcp_subnet=""
+    local dhcp_range=""
+    local dhcp_interface=""
+    if [[ -f "$CONFIG_DIR/pxe-server.env" ]]; then
+        source "$CONFIG_DIR/pxe-server.env"
+        dhcp_subnet="${PXE_SUBNET:-unknown}/${PXE_NETMASK:-255.255.255.0}"
+        dhcp_range="${PXE_RANGE_START:-unknown} - ${PXE_RANGE_END:-unknown}"
+        dhcp_interface="${PXE_INTERFACE:-unknown}"
     fi
+    
+    echo -e "  ${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${BLUE}│${NC}  ${CYAN}PXE Server Configuration${NC}                                  ${BLUE}│${NC}"
+    echo -e "  ${BLUE}├─────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "  ${BLUE}│${NC}  Server IP:        ${GREEN}$PXE_IP${NC}"
+    echo -e "  ${BLUE}│${NC}  Network Interface: $dhcp_interface"
+    echo -e "  ${BLUE}│${NC}  Profile Name:     $profile"
+    echo -e "  ${BLUE}│${NC}  Menu Label:       $MENU_LABEL"
+    echo -e "  ${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
-    echo -e "  ${BLUE}Boot Menus:${NC}"
-    echo -e "    BIOS:   $TFTP_DIR/pxelinux.cfg/default"
-    echo -e "    UEFI:   $TFTP_DIR/efi64/grub.cfg"
+    
+    echo -e "  ${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${BLUE}│${NC}  ${CYAN}DHCP Server Settings${NC}                                      ${BLUE}│${NC}"
+    echo -e "  ${BLUE}├─────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "  ${BLUE}│${NC}  Subnet:           $dhcp_subnet"
+    echo -e "  ${BLUE}│${NC}  Client IP Range:  $dhcp_range"
+    echo -e "  ${BLUE}│${NC}  Gateway/Router:   ${PXE_ROUTER:-$PXE_IP}"
+    echo -e "  ${BLUE}│${NC}  DNS Server:       ${PXE_DNS:-$PXE_IP}"
+    echo -e "  ${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
-    echo -e "  ${YELLOW}Next steps:${NC}"
-    echo "    1. Start or restart the PXE server:"
-    echo "       sudo $SCRIPT_DIR/pxe-server.sh restart"
+    
+    echo -e "  ${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${BLUE}│${NC}  ${CYAN}Boot Files (TFTP)${NC}                                         ${BLUE}│${NC}"
+    echo -e "  ${BLUE}├─────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "  ${BLUE}│${NC}  Kernel:   $TFTP_DIR/$profile/vmlinuz"
+    echo -e "  ${BLUE}│${NC}  Initrd:   $TFTP_DIR/$profile/initrd.img"
+    echo -e "  ${BLUE}│${NC}  TFTP URL: tftp://$PXE_IP/$profile/vmlinuz"
+    echo -e "  ${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
-    echo "    2. Boot a client via PXE and select:"
-    echo "       \"$MENU_LABEL\""
+    
+    local final_size=""
+    if [[ -f "$HTTP_DIR/$profile/squashfs.img" ]]; then
+        final_size=$(du -h "$HTTP_DIR/$profile/squashfs.img" 2>/dev/null | cut -f1)
+    fi
+    echo -e "  ${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${BLUE}│${NC}  ${CYAN}Root Filesystem (HTTP)${NC}                                    ${BLUE}│${NC}"
+    echo -e "  ${BLUE}├─────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "  ${BLUE}│${NC}  SquashFS: $HTTP_DIR/$profile/squashfs.img"
+    echo -e "  ${BLUE}│${NC}  Size:     ${final_size:-unknown}"
+    echo -e "  ${BLUE}│${NC}  HTTP URL: ${GREEN}http://$PXE_IP/$profile/squashfs.img${NC}"
+    echo -e "  ${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
-    echo -e "  ${BLUE}HTTP URL for squashfs:${NC}"
-    echo "    http://$PXE_IP/$profile/squashfs.img"
+    
+    echo -e "  ${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${BLUE}│${NC}  ${CYAN}Boot Menu Configurations${NC}                                  ${BLUE}│${NC}"
+    echo -e "  ${BLUE}├─────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "  ${BLUE}│${NC}  BIOS:  $TFTP_DIR/pxelinux.cfg/default"
+    echo -e "  ${BLUE}│${NC}  UEFI:  $TFTP_DIR/efi64/grub.cfg"
+    echo -e "  ${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    
+    echo -e "  ${YELLOW}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${YELLOW}│${NC}  ${YELLOW}Next Steps${NC}                                                 ${YELLOW}│${NC}"
+    echo -e "  ${YELLOW}├─────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "  ${YELLOW}│${NC}  1. Start or restart the PXE server:"
+    echo -e "  ${YELLOW}│${NC}     ${GREEN}sudo $SCRIPT_DIR/pxe-server.sh restart${NC}"
+    echo -e "  ${YELLOW}│${NC}"
+    echo -e "  ${YELLOW}│${NC}  2. Boot a client via PXE and select:"
+    echo -e "  ${YELLOW}│${NC}     \"${GREEN}$MENU_LABEL${NC}\""
+    echo -e "  ${YELLOW}│${NC}"
+    echo -e "  ${YELLOW}│${NC}  3. Client will:"
+    echo -e "  ${YELLOW}│${NC}     - Get IP from DHCP ($dhcp_range)"
+    echo -e "  ${YELLOW}│${NC}     - Load kernel/initrd via TFTP from $PXE_IP"
+    echo -e "  ${YELLOW}│${NC}     - Fetch root filesystem via HTTP from $PXE_IP"
+    echo -e "  ${YELLOW}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
 }
 
