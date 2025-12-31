@@ -14,10 +14,54 @@ A containerized PXE boot server for network booting Fedora Remix LiveCDs and oth
 - **Built-in Diagnostics**: Network diagnostic script available via boot menu and HTTP
 - **Firewall Ready**: Automatic firewall configuration for Fedora systems
 - **Registry Published**: Pre-built images available on quay.io
+- **LiveCD Integration**: Pre-installed on Fedora Remix LiveCD with container pre-cached
 
-## Quick Start (Recommended)
+## Fedora Remix LiveCD Integration
 
-The easiest way to use this PXE server is with the single-script launcher:
+If you're using the **Fedora Remix LiveCD**, the PXE server tools are already installed and ready to use!
+
+### Pre-installed Components
+
+| Location | Contents |
+|----------|----------|
+| `/opt/FedoraRemixPXETools/` | PXE server scripts |
+| `/usr/local/bin/` | Symlinks for easy access |
+| Root's container storage | Pre-cached container image |
+
+### Available Commands (on LiveCD)
+
+```bash
+# Launch the PXE server (interactive setup)
+sudo run-pxe-server
+
+# Show connected DHCP clients
+sudo show-dhcp-clients
+
+# Test PXE server services
+sudo test-pxe-services
+```
+
+The container image is **pre-cached**, so the PXE server starts immediately without downloading anything!
+
+### Kickstart Snippets (for LiveCD builders)
+
+If you're building your own Fedora Remix LiveCD, include these kickstart snippets:
+
+```kickstart
+## Download PXE tools from GitHub
+%include KickstartSnippets/install-fedoraremix-pxe.ks
+
+## Pre-cache the container image (optional, adds ~500MB to ISO)
+%include KickstartSnippets/pull-pxe-container.ks
+```
+
+The snippets are available in the [Fedora_Remix repository](https://github.com/tmichett/Fedora_Remix).
+
+---
+
+## Quick Start (Standalone Installation)
+
+For systems without the pre-installed tools:
 
 ```bash
 # Download and run the launcher (requires root)
@@ -27,8 +71,9 @@ sudo ./run-pxe-server.py
 The launcher will:
 1. Download the container image if needed
 2. Guide you through network configuration
-3. Ask if you want to extract from ISO or USB
-4. Start the PXE server with all services
+3. Configure firewall rules automatically
+4. Ask if you want to extract from ISO or USB
+5. Start the PXE server with all services
 
 ### Launcher Commands
 
@@ -64,7 +109,6 @@ If you prefer more control, use the individual scripts:
 
 1. **Clone the repository:**
    ```bash
-   cd ~/Github
    git clone https://github.com/tmichett/FedoraRemixPXE.git
    cd FedoraRemixPXE
    ```
@@ -120,6 +164,22 @@ FedoraRemixPXE/
     └── http/              # HTTP server root
         ├── <profile>/     # SquashFS images served via HTTP
         └── diag/          # Diagnostic scripts
+```
+
+### LiveCD Installation Structure
+
+When installed via kickstart on a LiveCD:
+
+```
+/opt/FedoraRemixPXETools/
+├── run-pxe-server.py      # Main launcher script
+├── show-dhcp-clients.sh   # DHCP client viewer
+└── test-services.sh       # Service tester
+
+/usr/local/bin/
+├── run-pxe-server         # Symlink → run-pxe-server.py
+├── show-dhcp-clients      # Symlink → show-dhcp-clients.sh
+└── test-pxe-services      # Symlink → test-services.sh
 ```
 
 ## Container Registry
@@ -252,12 +312,16 @@ This script checks:
 ```bash
 # Test all containerized services
 sudo ./test-services.sh
+# Or on LiveCD:
+sudo test-pxe-services
 
 # Show DHCP clients
 sudo ./show-dhcp-clients.sh
+# Or on LiveCD:
+sudo show-dhcp-clients
 
 # Watch DHCP activity in real-time
-sudo ./show-dhcp-clients.sh --watch
+sudo show-dhcp-clients --watch
 ```
 
 ## Configuration
@@ -279,7 +343,8 @@ The setup script will:
 1. Detect available network interfaces (excluding wireless/virtual)
 2. Display a table with interface status and IP addresses
 3. Let you select and configure the static IP on the interface
-4. Bind DHCP to the specific interface for proper operation
+4. Configure firewall rules (DHCP, TFTP, HTTP, DNS)
+5. Bind DHCP to the specific interface for proper operation
 
 ### Custom Network Settings
 
@@ -347,17 +412,18 @@ menuentry "Boot Custom Fedora" {
 
 ### Firewall Ports
 
-The following ports must be open on the PXE server:
+The following ports are automatically configured by the launcher:
 
 | Port | Protocol | Service |
 |------|----------|---------|
+| 53   | UDP/TCP  | DNS |
 | 67   | UDP      | DHCP Server |
 | 68   | UDP      | DHCP Client |
 | 69   | UDP      | TFTP |
 | 80   | TCP      | HTTP |
 | 4011 | UDP      | PXE Proxy DHCP (optional) |
 
-The setup script automatically configures `firewalld` if it's running.
+The `run-pxe-server.py` script automatically configures `firewalld` if it's running.
 
 ### Existing DHCP Server
 
@@ -381,7 +447,7 @@ If you have an existing DHCP server on your network, you have two options:
 - Check that DHCP is running: `./pxe-server.sh status`
 - Verify firewall rules: `sudo firewall-cmd --list-all`
 - Check for conflicting DHCP servers on the network
-- View DHCP activity: `sudo ./show-dhcp-clients.sh --watch`
+- View DHCP activity: `sudo show-dhcp-clients --watch`
 
 **Client gets IP but doesn't boot:**
 - Check TFTP is accessible: `tftp <server-ip> -c get pxelinux.0`
@@ -419,7 +485,7 @@ If you have an existing DHCP server on your network, you have two options:
 ./pxe-server.sh logs | grep -i dhcp
 
 # Test services
-sudo ./test-services.sh
+sudo test-pxe-services
 ```
 
 ### Testing TFTP
@@ -473,6 +539,10 @@ The container image includes:
 - **Shim/GRUB2** - UEFI bootloader files (Secure Boot capable)
 - **Extraction Script** - Built-in boot file extraction from ISO/USB
 - **Diagnostic Script** - Network troubleshooting tools
+
+## Related Projects
+
+- [Fedora Remix](https://github.com/tmichett/Fedora_Remix) - Custom Fedora LiveCD builder with PXE tools pre-installed
 
 ## License
 
